@@ -1,5 +1,5 @@
 /*
- * main.c
+* main.c
  *
  *  Created on: 31 янв. 2017 г.
  *      Author: root
@@ -27,6 +27,12 @@ struct ns_entry {
 	struct spdk_nvme_ns		*ns;
 	struct ns_entry			*next;
 	struct spdk_nvme_qpair	*qpair;
+};
+
+struct hello_world_sequence{
+	struct ns_entry		*ns_entry;
+	char 				*buf;
+	int 				is_completed;
 };
 
 static struct ctrlr_entry *g_controllers = NULL;
@@ -122,6 +128,85 @@ static void cleanup(void){
 		free(ctrlr_entry);
 		ctrlr_entry = next;
 	}
+	printf("Cleanup completed.\n");
+}
+
+static void read_complete(void *arg, const struct spdk_nvme_cpl *completion){
+	struct hello_world_sequence *sequence = arg;
+
+	printf("%s", sequence->buf);
+	spdk_free(sequence->buf);
+	sequence->is_completed = 1;
+}
+
+static void write_complete(void *arg, const struct spdk_nvme_cpl *completeion){
+	struct hello_world_sequence *sequence = arg;
+	struct ns_entry *ns_entry = sequence->ns_entry;
+	int rc;
+
+	//write io comleted, free the buffer and alloc new one for read
+	//spdk_free(sequence->buf);
+	//sequence->buf = spdk_zmalloc(0x1000, 0x1000, NULL);
+	sprintf(sequence->buf, "Dummy dummy dummy\n");
+
+	rc = spdk_nvme_ns_cmd_read(ns_entry->ns, ns_entry->qpair, sequence->buf,
+			0 /* LBA */, 1 /* LBA Count */,
+			read_complete, (void *)sequence, 0);
+
+	if(rc != 0){
+		fprintf(stderr, "starting read I/O failed\n");
+		exit(1);
+	}
+}
+
+static void hello_world(void){
+	struct ns_entry *ns_entry;
+	struct hello_world_sequence sequence;
+
+	int rc;
+
+	ns_entry = g_namespaces;
+	while(ns_entry != NULL){
+
+		//allocate io qpair
+		ns_entry->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_entry->ctrlr, 0);
+		if(ns_entry->qpair == NULL){
+			printf("ERROR: apdk_nvme_ctrlr_alloc_io_qpair failed\n");
+			return;
+		}
+
+		//allocate memory and pin it
+		sequence.buf = spdk_zmalloc(0x1000, 0x1000, NULL);
+		sequence.is_completed = 0;
+		sequence.ns_entry = ns_entry;
+
+		//print "Hello world" to sequence buffer. Write this data to LBA 0;
+		//and read later.
+
+		sprintf(sequence.buf, "Hello World!\n");
+
+		/* write to lba 0, "write_complete" and "&sequence" are the completion
+		 * callback and argument.
+		 */
+		rc = spdk_nvme_ns_cmd_write(ns_entry->ns, ns_entry->qpair, sequence.buf,
+				0 /* LBA */, 1 /* LBA Count */,
+				write_complete, &sequence, 0);
+
+		if(rc != 0){
+			fprintf(stderr, "starting write io failed\n");
+			exit(1);
+		}
+
+		//poll for completion
+		while(!sequence.is_completed){
+			spdk_nvme_qpair_process_completions(ns_entry->qpair, 0);
+		}
+
+		//free qpair
+		spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
+		ns_entry = ns_entry->next;
+	}
+
 }
 
 int main(int argc, char **argv){
@@ -148,7 +233,7 @@ int main(int argc, char **argv){
 
 	printf("Initialization complete.\n");
 
-	//hello_world();
+	hello_world();
 	cleanup();
 	return 0;
 }
