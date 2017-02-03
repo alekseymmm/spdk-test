@@ -49,7 +49,6 @@ static void register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns){
 				cdata->mn, cdata->sn, spdk_nvme_ns_get_id(ns));
 		return;
 	}
-
 	entry = malloc(sizeof(struct ns_entry));
 	if(entry == NULL){
 		perror("ns_entry malloc");
@@ -206,7 +205,6 @@ static void hello_world(void){
 		spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
 		ns_entry = ns_entry->next;
 	}
-
 }
 
 int main(int argc, char **argv){
