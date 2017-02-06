@@ -19,7 +19,7 @@ END_GROUP_FLAG := -Wl,--end-group -Wl,--no-whole-archive
 
 CFLAGS = -Wall -pthread -I $(SPDK_ROOT_DIR)/include/ \
 -I $(DPDK_DIR)/include -include $(SPDK_ROOT_DIR)/config.h -O0 -g\
--DHAVE_AIO -msse4.2
+-DHAVE_LIBAIO -D_GNU_SOURCE -msse4.2
  
 LFLAGS = -Wall -Wl,-z,relro,-z,now -Wl,-z,noexecstack -pthread \
 -L $(SPDK_LIBS_DIR) $(SPDK_LIBS) -L $(DPDK_LIBS_DIR) \

@@ -127,15 +127,29 @@ struct worker_thread {
 	unsigned		lcore;
 };
 
+struct controllers_list {
+	unsigned num_ctrlrs;
+	struct ctrlr_entry *head;
+};
+
+struct ns_list {
+	unsigned num_ns;
+	struct ns_entry *head;
+};
+
 static int g_outstanding_commands;
 
 static bool g_latency_tracking_enable = false;
 
 static struct rte_mempool *task_pool;
 
-static struct ctrlr_entry *g_controllers = NULL;
-static struct ns_entry *g_namespaces = NULL;
-static int g_num_namespaces = 0;
+
+static struct controllers_list g_controller = {0, NULL};
+static struct controllers_list g_controller_remote = {0, NULL};
+
+static struct ns_list g_namespaces = {0, NULL};
+static struct ns_list g_namespaces_remote = {0, NULL};
+
 static struct worker_thread *g_workers = NULL;
 static int g_num_workers = 0;
 
@@ -156,6 +170,7 @@ struct trid_entry {
 	TAILQ_ENTRY(trid_entry)		tailq;
 };
 
+
 static TAILQ_HEAD(, trid_entry) g_trid_list = TAILQ_HEAD_INITIALIZER(g_trid_list);
 
 static int g_aio_optind; /* Index of first AIO filename in argv */
@@ -164,7 +179,7 @@ static void
 task_complete(struct perf_task *task);
 
 static void
-register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
+register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns, struct ns_list *list_of_ns)
 {
 	struct ns_entry *entry;
 	const struct spdk_nvme_ctrlr_data *cdata;
@@ -203,15 +218,15 @@ register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 
 	snprintf(entry->name, 44, "%-20.20s (%-20.20s)", cdata->mn, cdata->sn);
 
-	g_num_namespaces++;
-	entry->next = g_namespaces;
-	g_namespaces = entry;
+    list_of_ns->num_ns++;
+	entry->next = list_of_ns->head;
+    list_of_ns->head = entry;
 }
 
 static void
-unregister_namespaces(void)
+unregister_namespaces(struct ns_list *list_of_ns)
 {
-	struct ns_entry *entry = g_namespaces;
+	struct ns_entry *entry = list_of_ns->head;
 
 	while (entry) {
 		struct ns_entry *next = entry->next;
@@ -255,7 +270,7 @@ set_latency_tracking_feature(struct spdk_nvme_ctrlr *ctrlr, bool enable)
 }
 
 static void
-register_ctrlr(struct spdk_nvme_ctrlr *ctrlr)
+register_ctrlr(struct spdk_nvme_ctrlr *ctrlr, struct controllers_list *list_of_cltrls, bool local_ctrlr)
 {
 	int nsid, num_ns;
 	struct ctrlr_entry *entry = malloc(sizeof(struct ctrlr_entry));
@@ -276,23 +291,28 @@ register_ctrlr(struct spdk_nvme_ctrlr *ctrlr)
 	snprintf(entry->name, sizeof(entry->name), "%-20.20s (%-20.20s)", cdata->mn, cdata->sn);
 
 	entry->ctrlr = ctrlr;
-	entry->next = g_controllers;
-	g_controllers = entry;
+	entry->next = list_of_cltrls->head;
+	list_of_cltrls->head = entry;
+	list_of_cltrls->num_ctrlrs++;
 
 	if (g_latency_tracking_enable &&
 	    spdk_nvme_ctrlr_is_feature_supported(ctrlr, SPDK_NVME_INTEL_FEAT_LATENCY_TRACKING))
 		set_latency_tracking_feature(ctrlr, true);
 
 	num_ns = spdk_nvme_ctrlr_get_num_ns(ctrlr);
+
 	for (nsid = 1; nsid <= num_ns; nsid++) {
-		register_ns(ctrlr, spdk_nvme_ctrlr_get_ns(ctrlr, nsid));
+		if(local_ctrlr)
+			register_ns(ctrlr, spdk_nvme_ctrlr_get_ns(ctrlr, nsid), &g_namespaces);
+		else
+			register_ns(ctrlr, spdk_nvme_ctrlr_get_ns(ctrlr, nsid), &g_namespaces_remote);
 	}
 
 }
 
 #if HAVE_LIBAIO
 static int
-register_aio_file(const char *path)
+register_aio_file(const char *path, struct ns_list *list_of_ns)
 {
 	struct ns_entry *entry;
 
@@ -344,9 +364,9 @@ register_aio_file(const char *path)
 
 	snprintf(entry->name, sizeof(entry->name), "%s", path);
 
-	g_num_namespaces++;
-	entry->next = g_namespaces;
-	g_namespaces = entry;
+	list_of_ns->num_ns++;
+	entry->next = list_of_ns->head;
+	list_of_ns->head = entry;
 
 	return 0;
 }
@@ -408,7 +428,7 @@ static void io_complete(void *ctx, const struct spdk_nvme_cpl *completion);
 static __thread unsigned int seed = 0;
 
 static void
-submit_single_io(struct ns_worker_ctx *ns_ctx)
+submit_single_io(struct ns_worker_ctx *ns_ctx/*, unsigned worker_id*/)
 {
 	struct perf_task	*task = NULL;
 	uint64_t		offset_in_ios;
@@ -421,7 +441,7 @@ submit_single_io(struct ns_worker_ctx *ns_ctx)
 	}
 
 	task->ns_ctx = ns_ctx;
-
+//TODO: generate random according to worker id
 	if (g_is_random) {
 		offset_in_ios = rand_r(&seed) % entry->size_in_ios;
 	} else {
@@ -752,7 +772,7 @@ print_latency_statistics(const char *op_name, enum spdk_nvme_intel_log_page log_
 
 	printf("%s Latency Statistics:\n", op_name);
 	printf("========================================================\n");
-	ctrlr = g_controllers;
+	ctrlr = g_controller.head;
 	while (ctrlr) {
 		if (spdk_nvme_ctrlr_is_log_page_supported(ctrlr->ctrlr, log_page)) {
 			if (spdk_nvme_ctrlr_cmd_get_log_page(ctrlr->ctrlr, log_page, SPDK_NVME_GLOBAL_NS_TAG,
@@ -771,14 +791,14 @@ print_latency_statistics(const char *op_name, enum spdk_nvme_intel_log_page log_
 	}
 
 	while (g_outstanding_commands) {
-		ctrlr = g_controllers;
+		ctrlr = g_controller.head;
 		while (ctrlr) {
 			spdk_nvme_ctrlr_process_admin_completions(ctrlr->ctrlr);
 			ctrlr = ctrlr->next;
 		}
 	}
 
-	ctrlr = g_controllers;
+	ctrlr = g_controller.head;
 	while (ctrlr) {
 		if (spdk_nvme_ctrlr_is_log_page_supported(ctrlr->ctrlr, log_page)) {
 			print_latency_page(ctrlr);
@@ -963,10 +983,14 @@ parse_args(int argc, char **argv)
 		g_is_random = 1;
 	}
 
-	if (TAILQ_EMPTY(&g_trid_list)) {
-		/* If no transport IDs specified, default to enumerating all local PCIe devices */
-		add_trid("trtype:pcie");
-	}
+//	if (TAILQ_EMPTY(&g_trid_list)) {
+//		/* If no transport IDs specified, default to enumerating all local PCIe devices */
+//		add_trid("trtype:pcie");
+//	}
+
+	//for my tests add local devices in any case
+	//TODO: uncomment it
+	add_trid("trtype:pcie");
 
 	g_aio_optind = optind;
 	optind = 1;
@@ -1037,11 +1061,24 @@ probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	struct spdk_pci_addr	pci_addr;
 	struct spdk_pci_device	*pci_dev;
 	struct spdk_pci_id	pci_id;
+	static int num_local_ctrlrs = 0;
+	static int num_rdma_ctrlrs = 0;
 
 	if (trid->trtype != SPDK_NVME_TRANSPORT_PCIE) {
 		printf("Attaching to NVMe over Fabrics controller at %s:%s: %s\n",
 		       trid->traddr, trid->trsvcid,
 		       trid->subnqn);
+		//I need only 1 nvmf controller
+		num_rdma_ctrlrs++;
+		if(num_rdma_ctrlrs == 1)
+			return true;
+		else{
+			printf("Attaching to NVMe Controller at %s [%04x:%04x] cancled!\n",
+			       trid->traddr,
+			       pci_id.vendor_id, pci_id.device_id);
+
+			return false;
+		}
 	} else {
 		if (spdk_pci_addr_parse(&pci_addr, trid->traddr)) {
 			return false;
@@ -1057,9 +1094,18 @@ probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 		printf("Attaching to NVMe Controller at %s [%04x:%04x]\n",
 		       trid->traddr,
 		       pci_id.vendor_id, pci_id.device_id);
-	}
+		//I need only 1 local controller
+		num_local_ctrlrs++;
+		if(num_local_ctrlrs == 1)
+			return true;
+		else{
+			printf("Attaching to NVMe Controller at %s [%04x:%04x] cancled!\n",
+			       trid->traddr,
+			       pci_id.vendor_id, pci_id.device_id);
+			return false;
+		}
 
-	return true;
+	}
 }
 
 static void
@@ -1074,6 +1120,7 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 		printf("Attached to NVMe over Fabrics controller at %s:%s: %s\n",
 		       trid->traddr, trid->trsvcid,
 		       trid->subnqn);
+		register_ctrlr(ctrlr, &g_controller_remote, false);
 	} else {
 		if (spdk_pci_addr_parse(&pci_addr, trid->traddr)) {
 			return;
@@ -1089,9 +1136,10 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 		printf("Attached to NVMe Controller at %s [%04x:%04x]\n",
 		       trid->traddr,
 		       pci_id.vendor_id, pci_id.device_id);
+		register_ctrlr(ctrlr, &g_controller, true);
 	}
 
-	register_ctrlr(ctrlr);
+
 }
 
 static int
@@ -1113,9 +1161,9 @@ register_controllers(void)
 }
 
 static void
-unregister_controllers(void)
+unregister_controllers(struct controllers_list *ctrlrs_list)
 {
-	struct ctrlr_entry *entry = g_controllers;
+	struct ctrlr_entry *entry = ctrlrs_list->head;
 
 	while (entry) {
 		struct ctrlr_entry *next = entry->next;
@@ -1137,7 +1185,7 @@ register_aio_files(int argc, char **argv)
 
 	/* Treat everything after the options as files for AIO */
 	for (i = g_aio_optind; i < argc; i++) {
-		if (register_aio_file(argv[i]) != 0) {
+		if (register_aio_file(argv[i], &g_namespaces) != 0) {
 			return 1;
 		}
 	}
@@ -1149,40 +1197,44 @@ register_aio_files(int argc, char **argv)
 static int
 associate_workers_with_ns(void)
 {
-	struct ns_entry		*entry = g_namespaces;
+	struct ns_entry		*entry = g_namespaces.head;
 	struct worker_thread	*worker = g_workers;
 	struct ns_worker_ctx	*ns_ctx;
-	int			i, count;
+	int			i, j, count;
 
-	count = g_num_namespaces > g_num_workers ? g_num_namespaces : g_num_workers;
+	//count = g_namespaces.num_ns > g_num_workers ? g_num_namespaces : g_num_workers;
+
+	count = 1;
 
 	for (i = 0; i < count; i++) {
 		if (entry == NULL) {
 			break;
 		}
 
-		ns_ctx = malloc(sizeof(struct ns_worker_ctx));
-		if (!ns_ctx) {
-			return -1;
+		for(j = 0; j < g_num_workers; j++){
+			ns_ctx = malloc(sizeof(struct ns_worker_ctx));
+			if (!ns_ctx) {
+				perror("Worker allocation failure.\n");
+				return -1;
+			}
+			memset(ns_ctx, 0, sizeof(*ns_ctx));
+
+			printf("Associating %s with lcore %d\n", entry->name, worker->lcore);
+			ns_ctx->min_tsc = UINT64_MAX;
+			ns_ctx->entry = entry;
+			ns_ctx->next = worker->ns_ctx;
+			worker->ns_ctx = ns_ctx;
+
+			worker = worker->next;
+			if (worker == NULL) {
+				worker = g_workers;
+			}
+
+			entry = entry->next;
+			if (entry == NULL) {
+				entry = g_namespaces.head;
+			}
 		}
-		memset(ns_ctx, 0, sizeof(*ns_ctx));
-
-		printf("Associating %s with lcore %d\n", entry->name, worker->lcore);
-		ns_ctx->min_tsc = UINT64_MAX;
-		ns_ctx->entry = entry;
-		ns_ctx->next = worker->ns_ctx;
-		worker->ns_ctx = ns_ctx;
-
-		worker = worker->next;
-		if (worker == NULL) {
-			worker = g_workers;
-		}
-
-		entry = entry->next;
-		if (entry == NULL) {
-			entry = g_namespaces;
-		}
-
 	}
 
 	return 0;
@@ -1263,8 +1315,9 @@ int main(int argc, char **argv)
 	 * number of attached active namespaces(aio files), queue depth
 	 * and number of cores (workers) involved in the IO operations.
 	 */
-	task_count = g_num_namespaces > g_num_workers ? g_num_namespaces : g_num_workers;
-	task_count *= g_queue_depth;
+	//task_count = g_namespaces->num_ns > g_num_workers ? g_namespaces->num_ns : g_num_workers;
+	//task_count
+	task_count = g_num_workers * g_queue_depth;
 
 	task_pool = rte_mempool_create(task_pool_name, task_count,
 				       sizeof(struct perf_task),
@@ -1299,8 +1352,10 @@ int main(int argc, char **argv)
 
 cleanup:
 	unregister_trids();
-	unregister_namespaces();
-	unregister_controllers();
+	unregister_namespaces(&g_namespaces);
+	unregister_namespaces(&g_namespaces_remote);
+	unregister_controllers(&g_controller);
+	unregister_controllers(&g_controller_remote);
 	unregister_workers();
 
 	if (rc != 0) {
