@@ -18,7 +18,7 @@ START_GROUP_FLAG := -Wl,--start-group -Wl,--whole-archive
 END_GROUP_FLAG := -Wl,--end-group -Wl,--no-whole-archive
 
 CFLAGS = -Wall -pthread -I $(SPDK_ROOT_DIR)/include/ \
--I $(DPDK_DIR)/include -include $(SPDK_ROOT_DIR)/config.h -O0 -g\
+-I $(DPDK_DIR)/include -include $(SPDK_ROOT_DIR)/config.h -O0 -g3\
 -DHAVE_LIBAIO -D_GNU_SOURCE -msse4.2
  
 LFLAGS = -Wall -Wl,-z,relro,-z,now -Wl,-z,noexecstack -pthread \
@@ -29,7 +29,7 @@ $(RDMA_LIBS) -lrt -laio
 
 OBJS := perf-test.o
 
-.PHONY: all $(DIRS-y)
+.PHONY: all $(DIRS-y) clean
 
 %.o : %.c
 	@$(CC) $(CFLAGS) -c $< -o $@
@@ -41,5 +41,8 @@ $(APP_NAME) : $(OBJS)
 	@$(LINKER) -o $(APP_NAME) $(OBJS) $(LFLAGS)
 	@echo "Build done."
 
-
-
+clean:
+	@echo "Cleaning targets..."
+	@rm -rf *.o
+	@rm -rf $(APP_NAME)
+	@echo "Cleaned."

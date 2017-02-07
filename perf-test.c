@@ -1101,15 +1101,15 @@ probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 		printf("Attaching to NVMe over Fabrics controller at %s:%s: %s\n",
 		       trid->traddr, trid->trsvcid,
 		       trid->subnqn);
+
 		//I need only 1 nvmf controller
 		num_rdma_ctrlrs++;
 		if(num_rdma_ctrlrs == 1)
 			return true;
 		else{
-			printf("Attaching to NVMe Controller at %s [%04x:%04x] cancled!\n",
-			       trid->traddr,
-			       pci_id.vendor_id, pci_id.device_id);
-
+			printf("Attaching to NVMe over Fabrics controller at %s:%s: %s canceled!\n",
+			       trid->traddr, trid->trsvcid,
+			       trid->subnqn);
 			return false;
 		}
 	} else {
