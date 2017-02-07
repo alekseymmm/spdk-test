@@ -65,6 +65,11 @@ enum entry_type {
 	ENTRY_TYPE_AIO_FILE,
 };
 
+enum task_type{
+	TASK_WRITE,
+	TASK_READ,
+};
+
 struct ns_entry {
 	enum entry_type		type;
 
@@ -121,6 +126,8 @@ struct perf_task {
 	void			*buf;
 	uint64_t		submit_tsc;
 	uint64_t 		cnt;
+	enum task_type 	type;
+
 #if HAVE_LIBAIO
 	struct iocb		iocb;
 #endif
@@ -467,6 +474,7 @@ submit_single_io(struct ns_worker_ctx *ns_ctx)
 		} else
 #endif
 		{
+			task->type = TASK_READ;
 			rc = spdk_nvme_ns_cmd_read(entry->u.nvme.ns, ns_ctx->u.nvme.qpair, task->buf,
 						   offset_in_ios * entry->io_size_blocks,
 						   entry->io_size_blocks, io_complete, task, 0);
@@ -480,6 +488,7 @@ submit_single_io(struct ns_worker_ctx *ns_ctx)
 		} else
 #endif
 		{
+			task->type = TASK_WRITE;
 			rc = spdk_nvme_ns_cmd_write(entry->u.nvme.ns, ns_ctx->u.nvme.qpair, task->buf,
 						    offset_in_ios * entry->io_size_blocks,
 						    entry->io_size_blocks, io_complete, task, 0);
@@ -507,7 +516,7 @@ task_complete(struct perf_task *task)
 	uint64_t		tsc_diff;
 
 	task->cnt--;
-	if(task->cnt == 0){
+	if(task->cnt == 0 || task->type == TASK_READ){
 		ns_ctx = task->ns_ctx;
 		ns_ctx->current_queue_depth--;
 		ns_ctx->io_completed++;
