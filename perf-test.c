@@ -88,6 +88,7 @@ struct ns_entry {
 
 struct ns_worker_ctx {
 	struct ns_entry		*entry;
+	struct ns_entry		*entry_remote;
 	uint64_t		io_completed;
 	uint64_t		total_tsc;
 	uint64_t		min_tsc;
@@ -95,10 +96,13 @@ struct ns_worker_ctx {
 	uint64_t		current_queue_depth;
 	uint64_t		offset_in_ios;
 	bool			is_draining;
+	uint64_t 		min_io;
+	uint64_t 		max_io;
 
 	union {
 		struct {
 			struct spdk_nvme_qpair	*qpair;
+			struct spdk_nvme_qpair  *qpair_remote;
 		} nvme;
 
 #if HAVE_LIBAIO
@@ -116,6 +120,7 @@ struct perf_task {
 	struct ns_worker_ctx	*ns_ctx;
 	void			*buf;
 	uint64_t		submit_tsc;
+	uint64_t 		cnt;
 #if HAVE_LIBAIO
 	struct iocb		iocb;
 #endif
@@ -428,7 +433,7 @@ static void io_complete(void *ctx, const struct spdk_nvme_cpl *completion);
 static __thread unsigned int seed = 0;
 
 static void
-submit_single_io(struct ns_worker_ctx *ns_ctx/*, unsigned worker_id*/)
+submit_single_io(struct ns_worker_ctx *ns_ctx)
 {
 	struct perf_task	*task = NULL;
 	uint64_t		offset_in_ios;
@@ -441,9 +446,9 @@ submit_single_io(struct ns_worker_ctx *ns_ctx/*, unsigned worker_id*/)
 	}
 
 	task->ns_ctx = ns_ctx;
-//TODO: generate random according to worker id
+
 	if (g_is_random) {
-		offset_in_ios = rand_r(&seed) % entry->size_in_ios;
+		offset_in_ios = rand_r(&seed) % (ns_ctx->max_io - ns_ctx->min_io) + ns_ctx->min_io;
 	} else {
 		offset_in_ios = ns_ctx->offset_in_ios++;
 		if (ns_ctx->offset_in_ios == entry->size_in_ios) {
@@ -465,6 +470,7 @@ submit_single_io(struct ns_worker_ctx *ns_ctx/*, unsigned worker_id*/)
 			rc = spdk_nvme_ns_cmd_read(entry->u.nvme.ns, ns_ctx->u.nvme.qpair, task->buf,
 						   offset_in_ios * entry->io_size_blocks,
 						   entry->io_size_blocks, io_complete, task, 0);
+
 		}
 	} else {
 #if HAVE_LIBAIO
@@ -477,6 +483,13 @@ submit_single_io(struct ns_worker_ctx *ns_ctx/*, unsigned worker_id*/)
 			rc = spdk_nvme_ns_cmd_write(entry->u.nvme.ns, ns_ctx->u.nvme.qpair, task->buf,
 						    offset_in_ios * entry->io_size_blocks,
 						    entry->io_size_blocks, io_complete, task, 0);
+			task->cnt++;
+
+			//also write it to nvmf target
+			rc = spdk_nvme_ns_cmd_write(g_namespaces_remote.head->u.nvme.ns, ns_ctx->u.nvme.qpair_remote, task->buf,
+						   offset_in_ios * entry->io_size_blocks,
+						   entry->io_size_blocks, io_complete, task, 0);
+			task->cnt++;
 		}
 	}
 
@@ -493,28 +506,31 @@ task_complete(struct perf_task *task)
 	struct ns_worker_ctx	*ns_ctx;
 	uint64_t		tsc_diff;
 
-	ns_ctx = task->ns_ctx;
-	ns_ctx->current_queue_depth--;
-	ns_ctx->io_completed++;
-	tsc_diff = spdk_get_ticks() - task->submit_tsc;
-	ns_ctx->total_tsc += tsc_diff;
-	if (ns_ctx->min_tsc > tsc_diff) {
-		ns_ctx->min_tsc = tsc_diff;
-	}
-	if (ns_ctx->max_tsc < tsc_diff) {
-		ns_ctx->max_tsc = tsc_diff;
-	}
+	task->cnt--;
+	if(task->cnt == 0){
+		ns_ctx = task->ns_ctx;
+		ns_ctx->current_queue_depth--;
+		ns_ctx->io_completed++;
+		tsc_diff = spdk_get_ticks() - task->submit_tsc;
+		ns_ctx->total_tsc += tsc_diff;
+		if (ns_ctx->min_tsc > tsc_diff) {
+			ns_ctx->min_tsc = tsc_diff;
+		}
+		if (ns_ctx->max_tsc < tsc_diff) {
+			ns_ctx->max_tsc = tsc_diff;
+		}
 
-	rte_mempool_put(task_pool, task);
+		rte_mempool_put(task_pool, task);
 
-	/*
-	 * is_draining indicates when time has expired for the test run
-	 * and we are just waiting for the previously submitted I/O
-	 * to complete.  In this case, do not submit a new I/O to replace
-	 * the one just completed.
-	 */
-	if (!ns_ctx->is_draining) {
-		submit_single_io(ns_ctx);
+		/*
+		 * is_draining indicates when time has expired for the test run
+		 * and we are just waiting for the previously submitted I/O
+		 * to complete.  In this case, do not submit a new I/O to replace
+		 * the one just completed.
+		 */
+		if (!ns_ctx->is_draining) {
+			submit_single_io(ns_ctx);
+		}
 	}
 }
 
@@ -534,6 +550,7 @@ check_io(struct ns_worker_ctx *ns_ctx)
 #endif
 	{
 		spdk_nvme_qpair_process_completions(ns_ctx->u.nvme.qpair, g_max_completions);
+		spdk_nvme_qpair_process_completions(ns_ctx->u.nvme.qpair_remote, g_max_completions);
 	}
 }
 
@@ -580,6 +597,11 @@ init_ns_worker_ctx(struct ns_worker_ctx *ns_ctx)
 			printf("ERROR: spdk_nvme_ctrlr_alloc_io_qpair failed\n");
 			return -1;
 		}
+		ns_ctx->u.nvme.qpair_remote = spdk_nvme_ctrlr_alloc_io_qpair(ns_ctx->entry_remote->u.nvme.ctrlr, 0);
+		if (!ns_ctx->u.nvme.qpair_remote) {
+			printf("ERROR: spdk_nvme_ctrlr_alloc_io_qpair failed for nvmf qpair\n");
+			return -1;
+		}
 	}
 
 	return 0;
@@ -595,6 +617,7 @@ cleanup_ns_worker_ctx(struct ns_worker_ctx *ns_ctx)
 #endif
 	} else {
 		spdk_nvme_ctrlr_free_io_qpair(ns_ctx->u.nvme.qpair);
+		spdk_nvme_ctrlr_free_io_qpair(ns_ctx->u.nvme.qpair_remote);
 	}
 }
 
@@ -624,6 +647,7 @@ work_fn(void *arg)
 	while (ns_ctx != NULL) {
 		submit_io(ns_ctx, g_queue_depth);
 		ns_ctx = ns_ctx->next;
+		break;
 	}
 
 	while (1) {
@@ -1201,6 +1225,7 @@ associate_workers_with_ns(void)
 	struct worker_thread	*worker = g_workers;
 	struct ns_worker_ctx	*ns_ctx;
 	int			i, j, count;
+	uint64_t 	ns_ctx_size_in_ios;
 
 	//count = g_namespaces.num_ns > g_num_workers ? g_num_namespaces : g_num_workers;
 
@@ -1222,7 +1247,13 @@ associate_workers_with_ns(void)
 			printf("Associating %s with lcore %d\n", entry->name, worker->lcore);
 			ns_ctx->min_tsc = UINT64_MAX;
 			ns_ctx->entry = entry;
+			ns_ctx->entry_remote = g_namespaces_remote.head;
 			ns_ctx->next = worker->ns_ctx;
+
+			ns_ctx_size_in_ios = ns_ctx->entry->size_in_ios / g_num_workers;
+			ns_ctx->min_io = j * ns_ctx_size_in_ios;
+			ns_ctx->max_io = (j + 1) * ns_ctx_size_in_ios;
+
 			worker->ns_ctx = ns_ctx;
 
 			worker = worker->next;
