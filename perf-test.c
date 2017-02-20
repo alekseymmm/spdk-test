@@ -444,7 +444,7 @@ submit_single_io(struct ns_worker_ctx *ns_ctx)
 {
 	struct perf_task	*task = NULL;
 	uint64_t		offset_in_ios;
-	int			rc;
+	int				rc;
 	struct ns_entry		*entry = ns_ctx->entry;
 
 	if (rte_mempool_get(task_pool, (void **)&task) != 0) {
@@ -478,11 +478,13 @@ submit_single_io(struct ns_worker_ctx *ns_ctx)
 			rc = spdk_nvme_ns_cmd_read(entry->u.nvme.ns, ns_ctx->u.nvme.qpair, task->buf,
 						   offset_in_ios * entry->io_size_blocks,
 						   entry->io_size_blocks, io_complete, task, 0);
+			task->cnt++;
 
 		}
 	} else {
 #if HAVE_LIBAIO
-		if (entry->type == ENTRY_TYPE_AIO_FILE) {
+		if (entry->type == ENTRY_TYPE_AIO_FILE)
+		{
 			rc = aio_submit(ns_ctx->u.aio.ctx, &task->iocb, entry->u.aio.fd, IO_CMD_PWRITE, task->buf,
 					g_io_size_bytes, offset_in_ios * g_io_size_bytes, task);
 		} else
